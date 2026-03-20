@@ -1,0 +1,23 @@
+# Milvus Standalone Docker Compose for chunky testing
+# Usage: docker-compose up -d
+
+services:
+  chunky-milvus:
+    image: milvusdb/milvus:v2.4.13
+    container_name: chunky-milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - ./milvus_data:/var/lib/milvus
+    environment:
+      - ETCD_USE_EMBED=true
+      - COMMON_STORAGETYPE=local
+    command: milvus run standalone
+    shm_size: "2gb"
+    networks:
+      - chunky-net
+
+networks:
+  chunky-net:
+    driver: bridge
