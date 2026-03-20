@@ -218,14 +218,8 @@ def init(test: bool) -> None:
         console.print("\n[dim]  Embedding model set to bag-of-words (test mode)[/dim]")
         console.print("[dim]  Reranker skipped (test mode)[/dim]")
     else:
-        # --- Embedding config ---
-        console.print("\n[bold]Embedding Configuration[/bold]")
-        emb_model = Prompt.ask(
-            "  Model name",
-            default="BAAI/bge-small-zh-v1.5",
-        )
-        emb_device = Prompt.ask("  Device", default="cpu")
-        embedding = EmbeddingConfig(model_name=emb_model, device=emb_device)
+        # --- Embedding config (interactive) ---
+        embedding = _prompt_embedding_config()
 
         # --- Reranker config ---
         console.print("\n[bold]Reranker Configuration[/bold]")
@@ -288,7 +282,9 @@ def _print_config_summary(config: ChunkyConfig) -> None:
     table.add_row("LLM", "Temperature", str(config.llm.temperature))
 
     # Embedding
+    table.add_row("Embedding", "API Type", config.embedding.api_type)
     table.add_row("Embedding", "Model", config.embedding.model_name)
+    table.add_row("Embedding", "API Base", config.embedding.api_base or "(local)")
     table.add_row("Embedding", "Device", config.embedding.device)
     table.add_row("Embedding", "Batch Size", str(config.embedding.batch_size))
 
@@ -366,19 +362,39 @@ def _prompt_embedding_config(existing: EmbeddingConfig | None = None) -> Embeddi
     defaults = existing or EmbeddingConfig()
 
     console.print("\n[bold]Embedding Configuration[/bold]")
+    
+    # API type selection
+    console.print("\n  [cyan]API Type:[/cyan]")
+    console.print("    1. sentence_transformers (local, default)")
+    console.print("    2. openai (OpenAI-compatible API)")
+    console.print("    3. vllm (vLLM server)")
+    api_type_choice = Prompt.ask(
+        "  Select API type",
+        choices=["1", "2", "3"],
+        default="1",
+    )
+    api_type_map = {"1": "sentence_transformers", "2": "openai", "3": "vllm"}
+    api_type = api_type_map[api_type_choice]
+
     model_name = Prompt.ask(
         "  Model name",
         default=defaults.model_name or "BAAI/bge-small-zh-v1.5",
     )
-    api_base = Prompt.ask(
-        "  API base URL (optional, for API-based embedding)",
-        default=defaults.api_base or "",
-    )
-    api_key = Prompt.ask(
-        "  API key (optional)",
-        password=True,
-        default=defaults.api_key or "",
-    )
+    
+    # Only show API base/key for API-based modes
+    api_base = ""
+    api_key = ""
+    if api_type in ("openai", "vllm"):
+        api_base = Prompt.ask(
+            "  API base URL",
+            default=defaults.api_base or "http://localhost:8000",
+        )
+        api_key = Prompt.ask(
+            "  API key (optional)",
+            password=True,
+            default=defaults.api_key or "",
+        )
+    
     device = Prompt.ask("  Device", default=defaults.device or "cpu")
     batch_size_str = Prompt.ask(
         "  Batch size",
@@ -391,6 +407,7 @@ def _prompt_embedding_config(existing: EmbeddingConfig | None = None) -> Embeddi
 
     return EmbeddingConfig(
         model_name=model_name,
+        api_type=api_type,
         api_base=api_base,
         api_key=api_key,
         device=device,
@@ -432,8 +449,9 @@ def _print_embedding_summary(config: ChunkyConfig) -> None:
     table.add_column("Setting", style="cyan", no_wrap=True)
     table.add_column("Value", style="white")
 
+    table.add_row("API Type", config.embedding.api_type)
     table.add_row("Model Name", config.embedding.model_name)
-    table.add_row("API Base", config.embedding.api_base or "(not set)")
+    table.add_row("API Base", config.embedding.api_base or "(local model)" if config.embedding.api_type != "sentence_transformers" else "(local model)")
     table.add_row("API Key", _mask_key(config.embedding.api_key))
     table.add_row("Device", config.embedding.device)
     table.add_row("Batch Size", str(config.embedding.batch_size))

@@ -148,35 +148,43 @@ class BagOfWordsEmbedder:
 
 
 # ---------------------------------------------------------------------------
-# API-based embedder — OpenAI-compatible embedding API
+# API-based embedder — OpenAI-compatible / vLLM embedding API
 # ---------------------------------------------------------------------------
 
 class APIEmbedder:
-    """Embedder that calls an OpenAI-compatible embedding API.
+    """Embedder that calls an OpenAI-compatible or vLLM embedding API.
 
-    Requires ``api_base`` and ``api_key`` to be set in the config.
-    Falls back to SentenceTransformerEmbedder if api_base is not set.
+    Supports three modes:
+    - sentence_transformers: Local model (default fallback)
+    - openai: OpenAI-compatible API (e.g., text-embedding-3-small)
+    - vllm: vLLM server (e.g., e5-mistral-7b-instruct)
 
     Parameters
     ----------
     config : EmbeddingConfig
-        Embedding configuration with api_base, api_key, and model_name.
+        Embedding configuration with api_base, api_key, model_name, and api_type.
     """
 
     def __init__(self, config: EmbeddingConfig) -> None:
         self.config = config
+        self._fallback = None
 
-        if not config.api_base or not config.api_key:
-            # Fall back to local model
-            logger.info("API base/key not set, falling back to SentenceTransformer")
-            self._fallback = SentenceTransformerEmbedder(config)
+        # Determine which embedder to use based on api_type
+        if config.api_type == "vllm" or config.api_type == "openai":
+            if not config.api_base:
+                logger.warning("API base not set, falling back to SentenceTransformer")
+                self._fallback = SentenceTransformerEmbedder(config)
+            else:
+                logger.info(
+                    "Using %s embedder: %s (model=%s)",
+                    config.api_type.upper(),
+                    config.api_base,
+                    config.model_name,
+                )
         else:
-            self._fallback = None
-            logger.info(
-                "Using API embedder: %s (model=%s)",
-                config.api_base,
-                config.model_name,
-            )
+            # sentence_transformers or unknown
+            logger.info("Using SentenceTransformer embedder")
+            self._fallback = SentenceTransformerEmbedder(config)
 
     def embed(self, chunks: list[Chunk]) -> list[Chunk]:
         """Embed all *chunks* via API call."""
@@ -188,12 +196,20 @@ class APIEmbedder:
 
         import httpx
 
+        texts = [c.text for c in chunks]
+
+        if self.config.api_type == "vllm":
+            return self._embed_vllm(chunks, texts)
+        else:
+            return self._embed_openai(chunks, texts)
+
+    def _embed_openai(self, chunks: list[Chunk], texts: list[str]) -> list[Chunk]:
+        """Embed using OpenAI-compatible API."""
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
 
-        texts = [c.text for c in chunks]
         payload = {
             "input": texts,
             "model": self.config.model_name,
@@ -208,7 +224,6 @@ class APIEmbedder:
                 result = response.json()
 
             embeddings = result["data"]
-            # Sort by index to maintain order
             embeddings_sorted = sorted(embeddings, key=lambda x: x["index"])
 
             for i, chunk in enumerate(chunks):
@@ -216,12 +231,71 @@ class APIEmbedder:
 
             dim = len(embeddings_sorted[0]["embedding"]) if embeddings_sorted else 0
             logger.info(
-                "API embedding complete: %d chunks, dim=%d",
+                "OpenAI embedding complete: %d chunks, dim=%d",
                 len(chunks),
                 dim,
             )
         except Exception as e:
-            logger.error("API embedding failed: %s, falling back to local model", e)
+            logger.error("OpenAI embedding failed: %s, falling back to local model", e)
+            self._fallback = SentenceTransformerEmbedder(self.config)
+            return self._fallback.embed(chunks)
+
+        return chunks
+
+    def _embed_vllm(self, chunks: list[Chunk], texts: list[str]) -> list[Chunk]:
+        """Embed using vLLM server API.
+
+        vLLM embedding API format:
+        POST /v1/embeddings
+        {
+            "input": ["text1", "text2"],
+            "model": "e5-mistral-7b-instruct"
+        }
+
+        Response:
+        {
+            "data": [{"embedding": [...], "index": 0}],
+            "model": "...",
+            "usage": {...}
+        }
+        """
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "input": texts,
+            "model": self.config.model_name,
+        }
+
+        api_url = f"{self.config.api_base.rstrip('/')}/v1/embeddings"
+
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                response = client.post(api_url, json=payload, headers=headers)
+                response.raise_for_status()
+                result = response.json()
+
+            embeddings = result.get("data", [])
+            embeddings_sorted = sorted(embeddings, key=lambda x: x.get("index", 0))
+
+            for i, chunk in enumerate(chunks):
+                embedding_data = embeddings_sorted[i] if i < len(embeddings_sorted) else None
+                if embedding_data and "embedding" in embedding_data:
+                    chunk.embedding = embedding_data["embedding"]
+                else:
+                    logger.warning("No embedding found for chunk %d", i)
+                    chunk.embedding = []
+
+            dim = len(embeddings_sorted[0]["embedding"]) if embeddings_sorted and "embedding" in embeddings_sorted[0] else 0
+            logger.info(
+                "vLLM embedding complete: %d chunks, dim=%d",
+                len(chunks),
+                dim,
+            )
+        except Exception as e:
+            logger.error("vLLM embedding failed: %s, falling back to local model", e)
             self._fallback = SentenceTransformerEmbedder(self.config)
             return self._fallback.embed(chunks)
 
@@ -230,8 +304,7 @@ class APIEmbedder:
     def get_dim(self) -> int:
         """Return the dimensionality of the embedding vectors.
 
-        Note: This is an approximation; actual dimension is known after
-        the first API call. Returns 0 to indicate unknown.
+        Returns 0 to indicate dimension is unknown until first API call.
         """
         return 0
 
