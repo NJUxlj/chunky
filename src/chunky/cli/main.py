@@ -183,6 +183,94 @@ def cli() -> None:
 
 
 # ───────────────────────────────────────────────────────────────────
+# chunky config  (subgroup)
+# ───────────────────────────────────────────────────────────────────
+
+
+@cli.command("config")
+@click.option(
+    "--list",
+    "list_all",
+    is_flag=True,
+    help="List all configuration settings.",
+)
+def config_cmd(list_all: bool) -> None:
+    """Show all configuration settings."""
+    config = load_config()
+
+    if list_all or True:  # Always show all when called as "config"
+        _print_full_config(config)
+
+
+def _print_full_config(config: ChunkyConfig) -> None:
+    """Print the complete configuration."""
+    console.print()
+    console.print(Panel("[bold cyan]chunky Configuration[/bold cyan]", expand=False))
+    console.print()
+
+    # LLM
+    llm_table = Table(title="LLM Configuration", box=None, show_lines=False)
+    llm_table.add_column("Setting", style="cyan")
+    llm_table.add_column("Value", style="white")
+    llm_table.add_row("API Type", config.llm.api_type)
+    llm_table.add_row("API Base", config.llm.api_base or "(not set)")
+    llm_table.add_row("API Key", _mask_key(config.llm.api_key))
+    llm_table.add_row("Model", config.llm.model or "(not set)")
+    llm_table.add_row("Max Tokens", str(config.llm.max_tokens))
+    llm_table.add_row("Temperature", str(config.llm.temperature))
+    console.print(llm_table)
+    console.print()
+
+    # Embedding
+    emb_table = Table(title="Embedding Configuration", box=None, show_lines=False)
+    emb_table.add_column("Setting", style="cyan")
+    emb_table.add_column("Value", style="white")
+    emb_table.add_row("API Type", config.embedding.api_type)
+    emb_table.add_row("Model Name", config.embedding.model_name)
+    emb_table.add_row("API Base", config.embedding.api_base or "(local model)")
+    emb_table.add_row("API Key", _mask_key(config.embedding.api_key))
+    emb_table.add_row("Device", config.embedding.device)
+    emb_table.add_row("Batch Size", str(config.embedding.batch_size))
+    console.print(emb_table)
+    console.print()
+
+    # Reranker
+    rer_table = Table(title="Reranker Configuration", box=None, show_lines=False)
+    rer_table.add_column("Setting", style="cyan")
+    rer_table.add_column("Value", style="white")
+    rer_table.add_row("Model Name", config.reranker.model_name or "(not set)")
+    rer_table.add_row("Device", config.reranker.device)
+    console.print(rer_table)
+    console.print()
+
+    # Vector Store
+    vs_table = Table(title="Vector Store Configuration", box=None, show_lines=False)
+    vs_table.add_column("Setting", style="cyan")
+    vs_table.add_column("Value", style="white")
+    vs_table.add_row("Type", config.vector_store_type)
+    
+    if config.vector_store_type == "chroma":
+        vs_table.add_row("Persist Directory", config.chroma.persist_directory)
+        vs_table.add_row("Default Collection", config.chroma.default_collection)
+        vs_table.add_row("Dimension", str(config.chroma.dim))
+    else:
+        vs_table.add_row("URI", config.milvus.uri)
+        vs_table.add_row("Lite Mode", str(config.milvus.use_lite))
+        vs_table.add_row("Default Collection", config.milvus.default_collection)
+        vs_table.add_row("Dimension", str(config.milvus.dim))
+    console.print(vs_table)
+    console.print()
+
+    # General
+    gen_table = Table(title="General", box=None, show_lines=False)
+    gen_table.add_column("Setting", style="cyan")
+    gen_table.add_column("Value", style="white")
+    gen_table.add_row("Test Mode", "ON" if config.test_mode else "OFF")
+    console.print(gen_table)
+    console.print()
+
+
+# ───────────────────────────────────────────────────────────────────
 # chunky init
 # ───────────────────────────────────────────────────────────────────
 
