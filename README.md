@@ -11,6 +11,142 @@
 - 🔍 **混合搜索**: 向量搜索 + BM25 融合
 - 💾 **双向量存储**: ChromaDB (轻量) / Milvus (大规模)
 
+## 命令行演示
+
+```
+$ chunky --help
+
+  Usage: chunky [OPTIONS] COMMAND [ARGS]...
+
+    chunky -- Build local knowledge bases from documents.
+
+  Options:
+    --help  Show this message and exit.
+
+  Commands:
+    build        Build a knowledge base from a directory of documents.
+    chroma       Manage ChromaDB vector store configuration.
+    collections  List all collections in the vector store.
+    config       Show all configuration settings.
+    embedding    Manage embedding model configuration.
+    init         Interactive setup for chunky configuration.
+    milvus       Manage Milvus vector store configuration.
+    models       Manage LLM model configuration.
+    search       Search the knowledge base using hybrid search (vector + BM25).
+```
+
+```
+$ chunky config --list
+
+            LLM Configuration
+ Setting      Value
+ API Type     openai
+ API Base     https://api.minimaxi.com/v1
+ API Key      sk-a****azsk
+ Model        MiniMax-M2-8K
+ Max Tokens   1024
+ Temperature  0.3
+
+    Embedding Configuration
+ Setting     Value
+ API Type    vllm
+ Model Name  bge-reranker-v2-m3
+ API Base    10.****:8996
+ API Key     sk-h****8996
+ Device      cpu
+ Batch Size  4
+
+     Vector Store Configuration
+ Setting             Value
+ Type                milvus
+ URI                 localhost:19530
+ Lite Mode           False
+ Default Collection  test_milvus
+ Dimension           384
+
+     General
+ Setting    Value
+ Test Mode  OFF
+```
+
+```
+$ chunky collections
+
+  Collections (2 found)
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                      ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ test_chroma               │
+│ test_milvus (default)     │
+└───────────────────────────┘
+```
+
+```
+$ chunky search "machine learning" --collection test_chroma -k 3 -v
+
+  ==================================================
+  chunky search -- hybrid search (vector + BM25)
+  ==================================================
+
+  Search Configuration:
+    Query:         machine learning
+    Collection:    test_chroma
+    Top K:         3
+    Vector Weight: 0.5
+    BM25 Weight:   0.5
+    Fusion Method: RRF
+
+  Connecting to vector store...
+  Building BM25 index...
+  Searching 4 chunks...
+
+  ============================================================
+  Found 3 results:
+  ============================================================
+
+  >>> Result #1: test_docs/test1.txt (chunk-0) (vec:-0.043, bm25:1.110, combined:0.033)
+  ----------------------------------------
+    This is a test document about machine learning. Machine learning is a subset of artificial intelligence.
+    Labels: machine, learning, test, document, about
+    Topics: is, learning, machine, about, this
+```
+
+```
+$ chunky build --dir ./test_docs
+
+  Build Summary
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Parameter        ┃ Value                                          ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+┃ Source directory ┃ /path/to/test_docs                             ┃
+┃ Collection       │ test_chroma                                    ┃
+┃ Test mode        │ OFF                                            ┃
+┃ Total files      │ 4                                              ┃
+│   .txt           │ 3                                              ┃
+│   .md            │ 1                                              ┃
+└──────────────────┴────────────────────────────────────────────────┘
+
+  🏗️  Building knowledge base: test_chroma
+  📁 Source directory: ./test_docs
+  🧪 Test mode: OFF
+
+  Step 1/6 Discovering and parsing files ...
+    Parsed 4 documents.
+
+  Step 2/6 Splitting text into chunks ...
+    Created 8 chunks.
+
+  Step 3-6/6 Processing chunks ...
+
+  📄 Chunking files ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% (4/4) 0:00:01
+  🔢 Embedding      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% (8/8) 0:00:05
+  🏷️ LLM Labeling   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% (8/8) 0:00:02
+  💾 Milvus Insert  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% (8/8) 0:00:00
+  🎯 LDA Topics     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% (8/8) 0:00:00
+
+  ✅ Done! Processed 8 chunks.
+```
+
 ## 快速开始
 
 ### 1. 初始化配置
