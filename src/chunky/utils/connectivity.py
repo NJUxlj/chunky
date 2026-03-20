@@ -204,30 +204,31 @@ def test_embedding_connectivity(config: EmbeddingConfig) -> ConnectivityTestResu
 
 
 def run_connectivity_tests(config: ChunkyConfig) -> list[ConnectivityTestResult]:
-    """Run all connectivity tests.
+    """Run connectivity tests for LLM and Embedding services.
 
-    Returns a list of ConnectivityTestResult for each test.
+    In test mode (--test):
+    - LLM: still checked (to validate the API config)
+    - Embedding: skipped (uses bag-of-words)
+
+    Args:
+        config: The ChunkyConfig to test.
+
+    Returns:
+        A list of ConnectivityTestResult for each test.
     """
     results = []
 
-    # Skip LLM test in test mode (uses bag-of-words)
-    if not config.test_mode:
-        results.append(test_llm_connectivity(config.llm))
-    else:
-        results.append(ConnectivityTestResult(
-            name="LLM Connection",
-            success=True,
-            message="Test mode: using bag-of-words (skipped)",
-        ))
+    # Always test LLM connectivity (even in test mode, to validate the config)
+    results.append(test_llm_connectivity(config.llm))
 
     # Skip embedding test in test mode (uses bag-of-words)
-    if not config.test_mode:
-        results.append(test_embedding_connectivity(config.embedding))
-    else:
+    if config.test_mode:
         results.append(ConnectivityTestResult(
             name="Embedding Connection",
             success=True,
             message="Test mode: using bag-of-words (skipped)",
         ))
+    else:
+        results.append(test_embedding_connectivity(config.embedding))
 
     return results
