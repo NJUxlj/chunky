@@ -290,14 +290,17 @@ def init(test: bool) -> None:
         )
     )
 
+    # Load existing config to preserve settings
+    existing_config = load_config()
+
     if test:
         console.print(
             "[yellow]Test mode enabled.[/yellow]  "
             "Embedding will use bag-of-words; topic modeling will use simple LDA.\n"
         )
 
-    # --- LLM config (always prompted) ---
-    llm = _prompt_llm_config()
+    # --- LLM config (always prompted, with existing values) ---
+    llm = _prompt_llm_config(existing=existing_config.llm)
 
     if test:
         # In test mode: skip embedding model (use bag-of-words), skip reranker
@@ -306,8 +309,8 @@ def init(test: bool) -> None:
         console.print("\n[dim]  Embedding model set to bag-of-words (test mode)[/dim]")
         console.print("[dim]  Reranker skipped (test mode)[/dim]")
     else:
-        # --- Embedding config (interactive) ---
-        embedding = _prompt_embedding_config()
+        # --- Embedding config (interactive, with existing values) ---
+        embedding = _prompt_embedding_config(existing=existing_config.embedding)
 
         # --- Reranker config ---
         console.print("\n[bold]Reranker Configuration[/bold]")
@@ -326,15 +329,15 @@ def init(test: bool) -> None:
     )
     
     if use_chroma:
-        # ChromaDB config
-        chroma = _prompt_chroma_config()
-        milvus = MilvusConfig()  # Use defaults
+        # ChromaDB config (with existing values)
+        chroma = _prompt_chroma_config(existing=existing_config.chroma)
+        milvus = existing_config.milvus  # Preserve Milvus config
         vector_store_type = "chroma"
         console.print("\n[green]Using ChromaDB as vector store[/green]")
     else:
-        # Milvus config
-        milvus = _prompt_milvus_config()
-        chroma = ChromaConfig()  # Use defaults
+        # Milvus config (with existing values)
+        milvus = _prompt_milvus_config(existing=existing_config.milvus)
+        chroma = existing_config.chroma  # Preserve ChromaDB config
         vector_store_type = "milvus"
         console.print("\n[green]Using Milvus as vector store[/green]")
 
