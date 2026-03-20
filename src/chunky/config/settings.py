@@ -24,6 +24,8 @@ class LLMConfig(BaseModel):
 
 class EmbeddingConfig(BaseModel):
     model_name: str = "BAAI/bge-small-zh-v1.5"
+    api_base: str = ""  # Optional API base URL for embedding service
+    api_key: str = ""    # Optional API key for embedding service
     device: str = "cpu"
     batch_size: int = 32
 

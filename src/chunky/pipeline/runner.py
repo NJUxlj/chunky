@@ -162,8 +162,9 @@ class PipelineRunner:
             from chunky.embedding.embedder import embed_chunks_test
             return embed_chunks_test([chunk], dim=self._get_embedding_dim())[0]
         else:
-            from chunky.embedding.embedder import embed_chunks
-            return embed_chunks([chunk], self.config.embedding)[0]
+            from chunky.embedding.embedder import APIEmbedder
+            embedder = APIEmbedder(self.config.embedding)
+            return embedder.embed([chunk])[0]
 
     def _label_single_chunk(self, chunk: Chunk) -> Chunk:
         if self.config.test_mode:

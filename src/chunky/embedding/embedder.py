@@ -148,6 +148,95 @@ class BagOfWordsEmbedder:
 
 
 # ---------------------------------------------------------------------------
+# API-based embedder — OpenAI-compatible embedding API
+# ---------------------------------------------------------------------------
+
+class APIEmbedder:
+    """Embedder that calls an OpenAI-compatible embedding API.
+
+    Requires ``api_base`` and ``api_key`` to be set in the config.
+    Falls back to SentenceTransformerEmbedder if api_base is not set.
+
+    Parameters
+    ----------
+    config : EmbeddingConfig
+        Embedding configuration with api_base, api_key, and model_name.
+    """
+
+    def __init__(self, config: EmbeddingConfig) -> None:
+        self.config = config
+
+        if not config.api_base or not config.api_key:
+            # Fall back to local model
+            logger.info("API base/key not set, falling back to SentenceTransformer")
+            self._fallback = SentenceTransformerEmbedder(config)
+        else:
+            self._fallback = None
+            logger.info(
+                "Using API embedder: %s (model=%s)",
+                config.api_base,
+                config.model_name,
+            )
+
+    def embed(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Embed all *chunks* via API call."""
+        if not chunks:
+            return chunks
+
+        if self._fallback is not None:
+            return self._fallback.embed(chunks)
+
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        texts = [c.text for c in chunks]
+        payload = {
+            "input": texts,
+            "model": self.config.model_name,
+        }
+
+        api_url = f"{self.config.api_base.rstrip('/')}/embeddings"
+
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                response = client.post(api_url, json=payload, headers=headers)
+                response.raise_for_status()
+                result = response.json()
+
+            embeddings = result["data"]
+            # Sort by index to maintain order
+            embeddings_sorted = sorted(embeddings, key=lambda x: x["index"])
+
+            for i, chunk in enumerate(chunks):
+                chunk.embedding = embeddings_sorted[i]["embedding"]
+
+            dim = len(embeddings_sorted[0]["embedding"]) if embeddings_sorted else 0
+            logger.info(
+                "API embedding complete: %d chunks, dim=%d",
+                len(chunks),
+                dim,
+            )
+        except Exception as e:
+            logger.error("API embedding failed: %s, falling back to local model", e)
+            self._fallback = SentenceTransformerEmbedder(self.config)
+            return self._fallback.embed(chunks)
+
+        return chunks
+
+    def get_dim(self) -> int:
+        """Return the dimensionality of the embedding vectors.
+
+        Note: This is an approximation; actual dimension is known after
+        the first API call. Returns 0 to indicate unknown.
+        """
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Legacy functional API (kept for backward compatibility with the pipeline)
 # ---------------------------------------------------------------------------
 

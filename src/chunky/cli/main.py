@@ -357,6 +357,91 @@ def models_list() -> None:
 
 
 # ───────────────────────────────────────────────────────────────────
+# chunky embedding  (subgroup)
+# ───────────────────────────────────────────────────────────────────
+
+
+def _prompt_embedding_config(existing: EmbeddingConfig | None = None) -> EmbeddingConfig:
+    """Interactively prompt the user for embedding configuration values."""
+    defaults = existing or EmbeddingConfig()
+
+    console.print("\n[bold]Embedding Configuration[/bold]")
+    model_name = Prompt.ask(
+        "  Model name",
+        default=defaults.model_name or "BAAI/bge-small-zh-v1.5",
+    )
+    api_base = Prompt.ask(
+        "  API base URL (optional, for API-based embedding)",
+        default=defaults.api_base or "",
+    )
+    api_key = Prompt.ask(
+        "  API key (optional)",
+        password=True,
+        default=defaults.api_key or "",
+    )
+    device = Prompt.ask("  Device", default=defaults.device or "cpu")
+    batch_size_str = Prompt.ask(
+        "  Batch size",
+        default=str(defaults.batch_size or 32),
+    )
+    try:
+        batch_size = int(batch_size_str)
+    except ValueError:
+        batch_size = 32
+
+    return EmbeddingConfig(
+        model_name=model_name,
+        api_base=api_base,
+        api_key=api_key,
+        device=device,
+        batch_size=batch_size,
+    )
+
+
+@cli.group()
+def embedding() -> None:
+    """Manage embedding model configuration."""
+
+
+@embedding.command("config")
+def embedding_config() -> None:
+    """Re-configure the embedding settings interactively."""
+    config = load_config()
+
+    console.print(
+        Panel("[bold cyan]Embedding Configuration[/bold cyan]", expand=False)
+    )
+
+    config.embedding = _prompt_embedding_config(existing=config.embedding)
+    save_config(config)
+
+    console.print("\n[bold green]Embedding configuration saved![/bold green]")
+    _print_embedding_summary(config)
+
+
+@embedding.command("list")
+def embedding_list() -> None:
+    """Display the current embedding configuration."""
+    config = load_config()
+    _print_embedding_summary(config)
+
+
+def _print_embedding_summary(config: ChunkyConfig) -> None:
+    """Print embedding configuration table."""
+    table = Table(title="Embedding Configuration")
+    table.add_column("Setting", style="cyan", no_wrap=True)
+    table.add_column("Value", style="white")
+
+    table.add_row("Model Name", config.embedding.model_name)
+    table.add_row("API Base", config.embedding.api_base or "(not set)")
+    table.add_row("API Key", _mask_key(config.embedding.api_key))
+    table.add_row("Device", config.embedding.device)
+    table.add_row("Batch Size", str(config.embedding.batch_size))
+
+    console.print(table)
+
+
+# ───────────────────────────────────────────────────────────────────
 # chunky milvus  (subgroup)
 # ───────────────────────────────────────────────────────────────────
 
