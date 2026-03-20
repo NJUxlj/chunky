@@ -696,7 +696,14 @@ def build(dir_path: str, collection: str | None) -> None:
     """Build a knowledge base from a directory of documents."""
     directory = Path(dir_path).resolve()
     config = load_config()
-    collection_name = collection or config.milvus.default_collection
+    
+    # Get the correct default collection based on vector store type
+    if collection:
+        collection_name = collection
+    elif config.vector_store_type == "chroma":
+        collection_name = config.chroma.default_collection
+    else:
+        collection_name = config.milvus.default_collection
 
     # ── Validate ──────────────────────────────────────────────────
     if not directory.is_dir():
@@ -710,6 +717,30 @@ def build(dir_path: str, collection: str | None) -> None:
             expand=False,
         )
     )
+
+    # ── Connectivity Tests ─────────────────────────────────────────
+    console.print("[bold]Step 0/N[/bold] Testing connectivity ...")
+    from chunky.utils.connectivity import run_connectivity_tests
+
+    results = run_connectivity_tests(config)
+    all_passed = True
+
+    for result in results:
+        if result.success:
+            console.print(f"  [green]✓[/green] {result.name}: {result.message}")
+        else:
+            all_passed = False
+            console.print(f"  [red]✗[/red] {result.name}: {result.message}")
+
+    console.print()
+
+    if not all_passed:
+        console.print("[bold red]Connectivity test failed![/bold red]")
+        console.print("[yellow]Please fix the issues above and try again.[/yellow]")
+        raise SystemExit(1)
+
+    console.print("[bold green]Connectivity test passed![/bold green]")
+    console.print()
 
     file_counts = _count_supported_files(directory)
     total_files = sum(file_counts.values())
