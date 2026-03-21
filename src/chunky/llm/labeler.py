@@ -16,6 +16,9 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+from typing import Callable
 
 import openai
 
@@ -70,6 +73,8 @@ class LLMLabeler:
     an OpenAI-compatible API, so only the ``api_base`` / ``base_url``
     differs.
 
+    Supports concurrent processing using thread pool for improved performance.
+
     Parameters
     ----------
     config:
@@ -88,54 +93,141 @@ class LLMLabeler:
     # Public API
     # ------------------------------------------------------------------
 
-    def label_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
+    def label_chunks(
+        self,
+        chunks: list[Chunk],
+        progress_callback: Callable[[], None] | None = None,
+    ) -> list[Chunk]:
         """Label every chunk via the configured LLM.
 
         Each chunk's ``.labels`` list is replaced with the parsed
-        response.  Chunks are modified **in-place** and also returned
+        response. Chunks are modified **in-place** and also returned
         for convenience.
+
+        Uses thread pool for concurrent processing to speed up labeling.
 
         Parameters
         ----------
         chunks:
             The chunks to label.
+        progress_callback:
+            Optional callback function called after each chunk is labeled.
+            Must be thread-safe.
 
         Returns
         -------
         list[Chunk]
             The same list with ``.labels`` populated.
         """
+        if not chunks:
+            return chunks
+
+        max_workers = max(1, self.config.max_concurrent)
+        
+        # For small batches, use sequential processing
+        if len(chunks) <= max_workers:
+            return self._label_chunks_sequential(chunks, progress_callback)
+        
+        # For large batches, use concurrent processing
+        return self._label_chunks_concurrent(chunks, max_workers, progress_callback)
+
+    def _label_chunks_sequential(
+        self,
+        chunks: list[Chunk],
+        progress_callback: Callable[[], None] | None = None,
+    ) -> list[Chunk]:
+        """Label chunks sequentially (for small batches)."""
         for i, chunk in enumerate(chunks):
-            # Choose prompt language based on the chunk content
-            if _is_mainly_chinese(chunk.text):
-                prompt = _PROMPT_ZH.format(text=chunk.text)
-            else:
-                prompt = _PROMPT_EN.format(text=chunk.text)
-
-            try:
-                response = self._client.chat.completions.create(
-                    model=self.config.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=self.config.max_tokens,
-                    temperature=self.config.temperature,
-                )
-                raw = response.choices[0].message.content or ""
-                # Parse comma-separated labels, stripping whitespace and
-                # empty strings
-                labels = [lbl.strip() for lbl in raw.split(",") if lbl.strip()]
-                chunk.labels = labels
-                logger.debug(
-                    "Chunk %d/%d labeled: %s", i + 1, len(chunks), labels
-                )
-            except Exception:
-                logger.warning(
-                    "LLM labeling failed for chunk %d, setting empty labels",
-                    i,
-                    exc_info=True,
-                )
-                chunk.labels = []
-
+            self._label_single_chunk(chunk, i, len(chunks))
+            if progress_callback:
+                progress_callback()
         return chunks
+
+    def _label_chunks_concurrent(
+        self,
+        chunks: list[Chunk],
+        max_workers: int,
+        progress_callback: Callable[[], None] | None = None,
+    ) -> list[Chunk]:
+        """Label chunks concurrently using thread pool."""
+        progress_lock = Lock()
+        
+        def label_with_index(args: tuple[int, Chunk]) -> tuple[int, Chunk]:
+            """Label a chunk and return its index for ordering."""
+            idx, chunk = args
+            self._label_single_chunk(chunk, idx, len(chunks))
+            
+            if progress_callback:
+                with progress_lock:
+                    progress_callback()
+            
+            return idx, chunk
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks with their original indices
+            future_to_idx = {
+                executor.submit(label_with_index, (i, chunk)): i
+                for i, chunk in enumerate(chunks)
+            }
+            
+            # Collect results as they complete
+            results: list[tuple[int, Chunk]] = []
+            for future in as_completed(future_to_idx):
+                try:
+                    idx, chunk = future.result()
+                    results.append((idx, chunk))
+                except Exception:
+                    # If task failed, find the original chunk and set empty labels
+                    idx = future_to_idx[future]
+                    logger.exception("Failed to label chunk %d", idx)
+                    chunks[idx].labels = []
+                    results.append((idx, chunks[idx]))
+                    if progress_callback:
+                        with progress_lock:
+                            progress_callback()
+        
+        # Sort by original index to maintain order
+        results.sort(key=lambda x: x[0])
+        
+        # Copy labels back to original chunks
+        for idx, chunk in results:
+            chunks[idx] = chunk
+        
+        return chunks
+
+    def _label_single_chunk(self, chunk: Chunk, index: int, total: int) -> None:
+        """Label a single chunk using LLM.
+        
+        Modifies chunk in-place.
+        """
+        # Choose prompt language based on the chunk content
+        if _is_mainly_chinese(chunk.text):
+            prompt = _PROMPT_ZH.format(text=chunk.text)
+        else:
+            prompt = _PROMPT_EN.format(text=chunk.text)
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self.config.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self.config.max_tokens,
+                temperature=self.config.temperature,
+            )
+            raw = response.choices[0].message.content or ""
+            # Parse comma-separated labels, stripping whitespace and
+            # empty strings
+            labels = [lbl.strip() for lbl in raw.split(",") if lbl.strip()]
+            chunk.labels = labels
+            logger.debug(
+                "Chunk %d/%d labeled: %s", index + 1, total, labels
+            )
+        except Exception:
+            logger.warning(
+                "LLM labeling failed for chunk %d, setting empty labels",
+                index,
+                exc_info=True,
+            )
+            chunk.labels = []
 
 
 # ---------------------------------------------------------------------------
@@ -217,14 +309,18 @@ class TestLabeler:
 # Backward-compatible free functions
 # ---------------------------------------------------------------------------
 
-def label_chunks(chunks: list[Chunk], config: LLMConfig) -> list[Chunk]:
+def label_chunks(
+    chunks: list[Chunk],
+    config: LLMConfig,
+    progress_callback: Callable[[], None] | None = None,
+) -> list[Chunk]:
     """Label chunks using an LLM (backward-compatible wrapper).
 
     Kept so that existing call sites (e.g. the pipeline runner) continue
     to work without changes.
     """
     labeler = LLMLabeler(config)
-    return labeler.label_chunks(chunks)
+    return labeler.label_chunks(chunks, progress_callback=progress_callback)
 
 
 def label_chunks_test(chunks: list[Chunk], top_k: int = 5) -> list[Chunk]:

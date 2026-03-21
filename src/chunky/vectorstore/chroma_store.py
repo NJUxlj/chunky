@@ -64,13 +64,73 @@ class ChromaStore:
             return False
 
     def drop_collection(self, collection_name: str) -> None:
-        """Drop a collection."""
+        """Drop a collection and clear internal cache.
+        
+        Also cleans up SQLite metadata if ChromaDB's delete_collection
+        doesn't fully remove the collection record.
+        """
+        import sqlite3
+        from pathlib import Path
+        
         client = self._get_client()
+        persist_dir = Path(self.config.persist_directory).expanduser()
+        db_path = persist_dir / "chroma.sqlite3"
+        
         try:
-            client.delete_collection(collection_name)
-            logger.info("Dropped collection '%s'", collection_name)
+            # Step 1: Use ChromaDB's API to delete
+            try:
+                client.get_collection(collection_name)
+                client.delete_collection(collection_name)
+                logger.info("Dropped collection '%s' via API", collection_name)
+            except Exception:
+                logger.info("Collection '%s' does not exist in ChromaDB API", collection_name)
+            
+            # Step 2: Force persist changes
+            if hasattr(client, 'persist'):
+                client.persist()
+            
+            # Step 3: Clean up SQLite if records still exist
+            if db_path.exists():
+                try:
+                    conn = sqlite3.connect(str(db_path))
+                    cursor = conn.cursor()
+                    
+                    # Find collection ID
+                    cursor.execute("SELECT id FROM collections WHERE name = ?", (collection_name,))
+                    result = cursor.fetchone()
+                    
+                    if result:
+                        collection_id = result[0]
+                        
+                        # Delete embeddings first (foreign key constraint)
+                        cursor.execute("DELETE FROM embeddings WHERE segment_id IN (SELECT id FROM segments WHERE collection_id = ?)", (collection_id,))
+                        
+                        # Delete segments
+                        cursor.execute("DELETE FROM segments WHERE collection_id = ?", (collection_id,))
+                        
+                        # Delete collection metadata
+                        cursor.execute("DELETE FROM collection_metadata WHERE collection_id = ?", (collection_id,))
+                        
+                        # Delete collection
+                        cursor.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
+                        
+                        conn.commit()
+                        logger.info("Cleaned up SQLite records for collection '%s'", collection_name)
+                    
+                    conn.close()
+                except Exception as e:
+                    logger.warning("SQLite cleanup warning: %s", e)
+            
+            # Step 4: Clear internal cache
+            if self._collection and self._collection.name == collection_name:
+                self._collection = None
+            
+            # Step 5: Reset client to clear any in-memory caches
+            self._client = None
+            
         except Exception as e:
-            logger.warning("Failed to drop collection: %s", e)
+            logger.error("Failed to drop collection '%s': %s", collection_name, e)
+            raise
 
     def insert_one(self, collection_name: str, chunk: Chunk) -> int:
         """Insert a single chunk."""

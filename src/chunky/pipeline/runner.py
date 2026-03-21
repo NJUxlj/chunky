@@ -136,21 +136,27 @@ class PipelineRunner:
         try:
             store.connect()
             store.create_collection(collection, dim)
+            
+            # Step 1: Embedding (sequential, can be slow on CPU)
+            self.console.print("  [dim]Embedding chunks...[/dim]")
+            for chunk in chunks:
+                chunk = self._embed_single_chunk(chunk)
+                self.progress.update_embedding(advance=1)
+            
+            # Step 2: LLM Labeling (concurrent for better performance)
+            self.console.print("  [dim]Labeling chunks with LLM (concurrent)...[/dim]")
+            chunks = self._label_chunks_concurrent(chunks)
+            
+            # Step 3: Insert to vector store in batches
             batch_size = 100
             total_inserted = 0
             for i in range(0, len(chunks), batch_size):
                 batch = chunks[i : i + batch_size]
-                processed_batch = []
-                for chunk in batch:
-                    chunk = self._embed_single_chunk(chunk)
-                    self.progress.update_embedding(advance=1)
-                    chunk = self._label_single_chunk(chunk)
-                    self.progress.update_llm_labeling(advance=1)
-                    processed_batch.append(chunk)
-                inserted = store.insert(collection, processed_batch)
+                inserted = store.insert(collection, batch)
                 total_inserted += inserted
                 for _ in range(inserted):
                     self.progress.update_milvus(advance=1)
+            
             store_type = "ChromaDB" if self.config.vector_store_type == "chroma" else "Milvus"
             self.console.print(f"\n  [green]Inserted {total_inserted} chunks into {store_type}[/green]")
             return dim
@@ -167,12 +173,33 @@ class PipelineRunner:
             return embedder.embed([chunk])[0]
 
     def _label_single_chunk(self, chunk: Chunk) -> Chunk:
+        """Label a single chunk (kept for compatibility)."""
         if self.config.test_mode:
             from chunky.llm.test_labeler import label_chunks_test
             return label_chunks_test([chunk])[0]
         else:
             from chunky.llm.labeler import label_chunks
             return label_chunks([chunk], self.config.llm)[0]
+
+    def _label_chunks_concurrent(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Label all chunks concurrently using thread pool.
+        
+        Uses LLMLabeler with concurrent processing for better performance.
+        """
+        if self.config.test_mode:
+            # Test mode doesn't benefit from concurrency
+            from chunky.llm.test_labeler import TestLabeler
+            labeler = TestLabeler(top_k=5)
+            return labeler.label_chunks(chunks)
+        else:
+            from chunky.llm.labeler import LLMLabeler
+            labeler = LLMLabeler(self.config.llm)
+            
+            # Use progress callback for thread-safe progress updates
+            def progress_callback():
+                self.progress.update_llm_labeling(advance=1)
+            
+            return labeler.label_chunks(chunks, progress_callback=progress_callback)
 
     def _assign_topics_with_progress(self, collection: str, total: int) -> None:
         from chunky.topics.modeler import assign_topics_lda_batch

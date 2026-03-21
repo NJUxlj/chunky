@@ -7,6 +7,9 @@ the pipeline runner.
 
 from __future__ import annotations
 
+# CRITICAL: Set HF_ENDPOINT BEFORE importing sentence_transformers
+from chunky.utils.hf_setup import HF_ENDPOINT, ensure_hf_endpoint
+
 import logging
 
 import numpy as np
@@ -26,24 +29,78 @@ logger = logging.getLogger(__name__)
 class SentenceTransformerEmbedder:
     """Dense embedder backed by ``sentence-transformers``.
 
+    Supports loading from local path or downloading from Hugging Face.
+    Auto-detects available HF endpoint (hf-mirror.com or huggingface.co).
+
     Parameters
     ----------
     config : EmbeddingConfig
         Embedding configuration carrying the model name, target device and
-        batch size.
+        batch size. If local_model_path is set, will try loading from there first.
     """
 
     def __init__(self, config: EmbeddingConfig) -> None:
         self.config = config
 
+        # HF_ENDPOINT is already set by hf_setup module import
+        logger.info(f"Using Hugging Face endpoint: {HF_ENDPOINT}")
+
         from sentence_transformers import SentenceTransformer
 
+        # Determine model to load
+        model_path = self._resolve_model_path()
+        
         logger.info(
             "Loading SentenceTransformer model: %s (device=%s)",
-            config.model_name,
+            model_path,
             config.device,
         )
-        self._model = SentenceTransformer(config.model_name, device=config.device)
+        
+        try:
+            self._model = SentenceTransformer(model_path, device=config.device)
+        except Exception as e:
+            logger.error(f"Failed to load model from {model_path}: {e}")
+            raise
+
+    def _resolve_model_path(self) -> str:
+        """Resolve the model path to use.
+        
+        Priority:
+        1. Explicit local model path (if set and valid)
+        2. Default cache path (check if already downloaded)
+        3. Model name (download from HF)
+        
+        Returns:
+            Path or model name to load
+        """
+        from chunky.utils.network import validate_model_path
+        from chunky.utils.model_downloader import ModelDownloadManager
+        
+        local_path = self.config.local_model_path
+        model_name = self.config.model_name
+        
+        # Priority 1: Check explicit local path
+        if local_path:
+            is_valid, msg = validate_model_path(local_path)
+            if is_valid:
+                logger.info(f"Using local model from: {local_path}")
+                return local_path
+            else:
+                # Warning about invalid local path
+                logger.warning(f"⚠️  Local model path invalid: {msg}")
+                logger.warning(f"⚠️  Falling back to cache/default path")
+        
+        # Priority 2: Check default cache path
+        cache_manager = ModelDownloadManager()
+        cache_path = cache_manager.get_model_cache_path(model_name)
+        
+        if cache_manager.is_model_cached(model_name):
+            logger.info(f"Using cached model from: {cache_path}")
+            return str(cache_path)
+        
+        # Priority 3: Download from HF
+        logger.info(f"Model not in cache, will download: {model_name}")
+        return model_name
 
     # -- public API ---------------------------------------------------------
 

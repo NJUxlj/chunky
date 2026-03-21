@@ -194,11 +194,43 @@ def cli() -> None:
     is_flag=True,
     help="List all configuration settings.",
 )
-def config_cmd(list_all: bool) -> None:
-    """Show all configuration settings."""
+@click.option(
+    "--test-mode",
+    type=click.Choice(["on", "off"], case_sensitive=False),
+    help="Toggle test mode on or off (without interactive configuration).",
+)
+def config_cmd(list_all: bool, test_mode: str | None) -> None:
+    """Show or modify configuration settings.
+    
+    Examples:
+        chunky config                  # Show all configuration
+        chunky config --list           # Same as above
+        chunky config --test-mode on   # Enable test mode
+        chunky config --test-mode off  # Disable test mode
+    """
     config = load_config()
 
-    if list_all or True:  # Always show all when called as "config"
+    # Handle test-mode toggle
+    if test_mode is not None:
+        config.test_mode = (test_mode.lower() == "on")
+        save_config(config)
+        status = "enabled" if config.test_mode else "disabled"
+        console.print(f"[bold green]Test mode {status}![/bold green]")
+        console.print()
+        if config.test_mode:
+            console.print("[dim]Test mode uses lightweight implementations:[/dim]")
+            console.print("  • Embedding: bag-of-words (TF-IDF + SVD)")
+            console.print("  • LLM Labeling: keyword extraction")
+            console.print("  • Reranker: disabled")
+        else:
+            console.print("[dim]Normal mode uses configured services:[/dim]")
+            console.print("  • Embedding: neural models via API or local")
+            console.print("  • LLM Labeling: LLM API calls")
+            console.print("  • Reranker: configured cross-encoder model")
+        return
+
+    # Default: show all configuration
+    if list_all or True:
         _print_full_config(config)
 
 
@@ -227,6 +259,8 @@ def _print_full_config(config: ChunkyConfig) -> None:
     emb_table.add_column("Value", style="white")
     emb_table.add_row("API Type", config.embedding.api_type)
     emb_table.add_row("Model Name", config.embedding.model_name)
+    if config.embedding.local_model_path:
+        emb_table.add_row("Local Path", config.embedding.local_model_path)
     emb_table.add_row("API Base", config.embedding.api_base or "(local model)")
     emb_table.add_row("API Key", _mask_key(config.embedding.api_key))
     emb_table.add_row("Device", config.embedding.device)
@@ -238,8 +272,15 @@ def _print_full_config(config: ChunkyConfig) -> None:
     rer_table = Table(title="Reranker Configuration", box=None, show_lines=False)
     rer_table.add_column("Setting", style="cyan")
     rer_table.add_column("Value", style="white")
+    rer_table.add_row("API Type", config.reranker.api_type)
     rer_table.add_row("Model Name", config.reranker.model_name or "(not set)")
-    rer_table.add_row("Device", config.reranker.device)
+    if config.reranker.local_model_path:
+        rer_table.add_row("Local Path", config.reranker.local_model_path)
+    if config.reranker.api_type in ("vllm", "openai"):
+        rer_table.add_row("API Base", config.reranker.api_base or "(not set)")
+        rer_table.add_row("API Key", _mask_key(config.reranker.api_key))
+    else:
+        rer_table.add_row("Device", config.reranker.device)
     console.print(rer_table)
     console.print()
 
@@ -313,13 +354,7 @@ def init(test: bool) -> None:
         embedding = _prompt_embedding_config(existing=existing_config.embedding)
 
         # --- Reranker config ---
-        console.print("\n[bold]Reranker Configuration[/bold]")
-        reranker_model = Prompt.ask(
-            "  Model name",
-            default="BAAI/bge-reranker-base",
-        )
-        reranker_device = Prompt.ask("  Device", default="cpu")
-        reranker = RerankerConfig(model_name=reranker_model, device=reranker_device)
+        reranker = _prompt_reranker_config()
 
     # --- Vector Store Type ---
     console.print("\n[bold]Vector Store Configuration[/bold]")
@@ -375,13 +410,22 @@ def _print_config_summary(config: ChunkyConfig) -> None:
     # Embedding
     table.add_row("Embedding", "API Type", config.embedding.api_type)
     table.add_row("Embedding", "Model", config.embedding.model_name)
+    if config.embedding.local_model_path:
+        table.add_row("Embedding", "Local Path", config.embedding.local_model_path)
     table.add_row("Embedding", "API Base", config.embedding.api_base or "(local)")
     table.add_row("Embedding", "Device", config.embedding.device)
     table.add_row("Embedding", "Batch Size", str(config.embedding.batch_size))
 
     # Reranker
+    table.add_row("Reranker", "API Type", config.reranker.api_type)
     table.add_row("Reranker", "Model", config.reranker.model_name or "(not set)")
-    table.add_row("Reranker", "Device", config.reranker.device)
+    if config.reranker.local_model_path:
+        table.add_row("Reranker", "Local Path", config.reranker.local_model_path)
+    if config.reranker.api_type in ("vllm", "openai"):
+        table.add_row("Reranker", "API Base", config.reranker.api_base or "(not set)")
+        table.add_row("Reranker", "API Key", _mask_key(config.reranker.api_key))
+    else:
+        table.add_row("Reranker", "Device", config.reranker.device)
 
     # Milvus
     table.add_row("Milvus", "URI", config.milvus.uri)
@@ -437,8 +481,12 @@ def models_list() -> None:
     table.add_row("Temperature", str(config.llm.temperature))
     table.add_row("Embedding Model", config.embedding.model_name)
     table.add_row("Embedding Device", config.embedding.device)
+    table.add_row("Reranker Type", config.reranker.api_type)
     table.add_row("Reranker Model", config.reranker.model_name or "(not set)")
-    table.add_row("Reranker Device", config.reranker.device)
+    if config.reranker.api_type in ("vllm", "openai"):
+        table.add_row("Reranker API Base", config.reranker.api_base or "(not set)")
+    else:
+        table.add_row("Reranker Device", config.reranker.device)
 
     console.print(table)
 
@@ -446,6 +494,86 @@ def models_list() -> None:
 # ───────────────────────────────────────────────────────────────────
 # chunky embedding  (subgroup)
 # ───────────────────────────────────────────────────────────────────
+
+
+def _prompt_reranker_config(existing: RerankerConfig | None = None) -> RerankerConfig:
+    """Interactively prompt the user for reranker configuration values."""
+    defaults = existing or RerankerConfig()
+
+    console.print("\n[bold]Reranker Configuration[/bold]")
+    
+    # API type selection
+    console.print("\n  [cyan]Reranker Type:[/cyan]")
+    console.print("    1. local (local cross-encoder model, default)")
+    console.print("    2. vllm (vLLM reranker API server)")
+    console.print("    3. openai (OpenAI-compatible reranker API)")
+    api_type_choice = Prompt.ask(
+        "  Select reranker type",
+        choices=["1", "2", "3"],
+        default="1",
+    )
+    api_type_map = {"1": "local", "2": "vllm", "3": "openai"}
+    api_type = api_type_map[api_type_choice]
+
+    # Show cached models in cache directory
+    if api_type == "local":
+        cache_dir = Path.home() / ".cache" / "chunky" / "models"
+        if cache_dir.exists():
+            # Only show valid model dirs (contain config.json)
+            cached_models = [
+                d.name for d in cache_dir.iterdir() 
+                if d.is_dir() and not d.name.startswith(".") and (d / "config.json").exists()
+            ]
+            if cached_models:
+                console.print("    [dim]Cached models (use short name or full HF ID):[/dim]")
+                for model in sorted(cached_models):
+                    # Convert cache name back to readable format
+                    readable = model.replace("--", "/")
+                    console.print(f"    [dim]• {readable}[/dim]")
+
+    model_name = Prompt.ask(
+        "  Model name (Hugging Face model ID)",
+        default=defaults.model_name or "BAAI/bge-reranker-base",
+    )
+    
+    # Local model path (only for local mode)
+    local_model_path = ""
+    if api_type == "local":
+        use_local_path = Confirm.ask(
+            "  Use local model path?",
+            default=bool(defaults.local_model_path),
+        )
+        if use_local_path:
+            local_model_path = Prompt.ask(
+                "  Local model path",
+                default=defaults.local_model_path or "",
+            )
+    
+    api_base = ""
+    api_key = ""
+    device = defaults.device or "cpu"
+    
+    if api_type in ("vllm", "openai"):
+        api_base = Prompt.ask(
+            "  API base URL",
+            default=defaults.api_base or "http://localhost:8000",
+        )
+        api_key = Prompt.ask(
+            "  API key (optional)",
+            password=True,
+            default=defaults.api_key or "",
+        )
+    else:
+        device = Prompt.ask("  Device", default=defaults.device or "cpu")
+
+    return RerankerConfig(
+        model_name=model_name,
+        api_type=api_type,
+        api_base=api_base,
+        api_key=api_key,
+        device=device,
+        local_model_path=local_model_path,
+    )
 
 
 def _prompt_embedding_config(existing: EmbeddingConfig | None = None) -> EmbeddingConfig:
@@ -467,10 +595,39 @@ def _prompt_embedding_config(existing: EmbeddingConfig | None = None) -> Embeddi
     api_type_map = {"1": "sentence_transformers", "2": "openai", "3": "vllm"}
     api_type = api_type_map[api_type_choice]
 
+    # Show cached models in cache directory
+    if api_type == "sentence_transformers":
+        cache_dir = Path.home() / ".cache" / "chunky" / "models"
+        if cache_dir.exists():
+            # Only show valid model dirs (contain config.json)
+            cached_models = [
+                d.name for d in cache_dir.iterdir() 
+                if d.is_dir() and not d.name.startswith(".") and (d / "config.json").exists()
+            ]
+            if cached_models:
+                console.print("    [dim]Cached models (use short name or full HF ID):[/dim]")
+                for model in sorted(cached_models):
+                    # Convert cache name back to readable format
+                    readable = model.replace("--", "/")
+                    console.print(f"    [dim]• {readable}[/dim]")
+
     model_name = Prompt.ask(
-        "  Model name",
+        "  Model name (Hugging Face model ID)",
         default=defaults.model_name or "BAAI/bge-small-zh-v1.5",
     )
+    
+    # Local model path (only for local mode)
+    local_model_path = ""
+    if api_type == "sentence_transformers":
+        use_local_path = Confirm.ask(
+            "  Use local model path?",
+            default=bool(defaults.local_model_path),
+        )
+        if use_local_path:
+            local_model_path = Prompt.ask(
+                "  Local model path",
+                default=defaults.local_model_path or "",
+            )
     
     # Only show API base/key for API-based modes
     api_base = ""
@@ -503,6 +660,7 @@ def _prompt_embedding_config(existing: EmbeddingConfig | None = None) -> Embeddi
         api_key=api_key,
         device=device,
         batch_size=batch_size,
+        local_model_path=local_model_path,
     )
 
 
@@ -542,10 +700,64 @@ def _print_embedding_summary(config: ChunkyConfig) -> None:
 
     table.add_row("API Type", config.embedding.api_type)
     table.add_row("Model Name", config.embedding.model_name)
+    if config.embedding.local_model_path:
+        table.add_row("Local Path", config.embedding.local_model_path)
     table.add_row("API Base", config.embedding.api_base or "(local model)" if config.embedding.api_type != "sentence_transformers" else "(local model)")
     table.add_row("API Key", _mask_key(config.embedding.api_key))
     table.add_row("Device", config.embedding.device)
     table.add_row("Batch Size", str(config.embedding.batch_size))
+
+    console.print(table)
+
+
+# ───────────────────────────────────────────────────────────────────
+# chunky reranker  (subgroup)
+# ───────────────────────────────────────────────────────────────────
+
+
+@cli.group()
+def reranker() -> None:
+    """Manage reranker model configuration."""
+
+
+@reranker.command("config")
+def reranker_config() -> None:
+    """Re-configure the reranker settings interactively."""
+    config = load_config()
+
+    console.print(
+        Panel("[bold cyan]Reranker Configuration[/bold cyan]", expand=False)
+    )
+
+    config.reranker = _prompt_reranker_config(existing=config.reranker)
+    save_config(config)
+
+    console.print("\n[bold green]Reranker configuration saved![/bold green]")
+    _print_reranker_summary(config)
+
+
+@reranker.command("list")
+def reranker_list() -> None:
+    """Display the current reranker configuration."""
+    config = load_config()
+    _print_reranker_summary(config)
+
+
+def _print_reranker_summary(config: ChunkyConfig) -> None:
+    """Print reranker configuration table."""
+    table = Table(title="Reranker Configuration")
+    table.add_column("Setting", style="cyan", no_wrap=True)
+    table.add_column("Value", style="white")
+
+    table.add_row("API Type", config.reranker.api_type)
+    table.add_row("Model Name", config.reranker.model_name or "(not set)")
+    if config.reranker.local_model_path:
+        table.add_row("Local Path", config.reranker.local_model_path)
+    if config.reranker.api_type in ("vllm", "openai"):
+        table.add_row("API Base", config.reranker.api_base or "(not set)")
+        table.add_row("API Key", _mask_key(config.reranker.api_key))
+    else:
+        table.add_row("Device", config.reranker.device)
 
     console.print(table)
 
@@ -561,14 +773,53 @@ def _print_embedding_summary(config: ChunkyConfig) -> None:
     default=None,
     help="Print or set the default Milvus collection name.",
 )
+@click.option(
+    "--delete",
+    "delete_flag",
+    is_flag=True,
+    default=False,
+    help="Delete the specified collection.",
+)
 @click.pass_context
-def milvus(ctx: click.Context, collection: str | None) -> None:
+def milvus(ctx: click.Context, collection: str | None, delete_flag: bool) -> None:
     """Manage Milvus vector store configuration."""
     # If a subcommand is being invoked, let it handle things.
     if ctx.invoked_subcommand is not None:
         return
 
     config = load_config()
+
+    if delete_flag:
+        # Delete collection mode
+        if collection is None:
+            collection = config.milvus.default_collection
+        
+        if not collection:
+            console.print("[red]Error:[/red] No collection specified. Use --collection or set default.")
+            raise SystemExit(1)
+        
+        from rich.prompt import Confirm
+        if not Confirm.ask(f"Delete collection '{collection}'? This cannot be undone.", default=False):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+        
+        # Perform deletion
+        try:
+            from chunky.vectorstore.milvus_store import MilvusStore
+            store = MilvusStore(config.milvus)
+            store.connect()
+            
+            if store.collection_exists(collection):
+                store.drop_collection(collection)
+                console.print(f"[bold green]✓ Collection '{collection}' deleted.[/bold green]")
+            else:
+                console.print(f"[yellow]Collection '{collection}' does not exist.[/yellow]")
+            
+            store.close()
+        except Exception as e:
+            console.print(f"[red]Failed to delete collection:[/red] {e}")
+            raise SystemExit(1)
+        return
 
     if collection is not None:
         # Set collection override and switch to Milvus
@@ -626,14 +877,52 @@ def milvus_config() -> None:
     default=None,
     help="Print or set the default ChromaDB collection name.",
 )
+@click.option(
+    "--delete",
+    "delete_flag",
+    is_flag=True,
+    default=False,
+    help="Delete the specified collection.",
+)
 @click.pass_context
-def chroma(ctx: click.Context, collection_name: str | None) -> None:
+def chroma(ctx: click.Context, collection_name: str | None, delete_flag: bool) -> None:
     """Manage ChromaDB vector store configuration."""
     # If a subcommand is being invoked, let it handle things.
     if ctx.invoked_subcommand is not None:
         return
 
     config = load_config()
+
+    if delete_flag:
+        # Delete collection mode
+        target_collection = collection_name or config.chroma.default_collection
+        
+        if not target_collection:
+            console.print("[red]Error:[/red] No collection specified. Use --collection or set default.")
+            raise SystemExit(1)
+        
+        from rich.prompt import Confirm
+        if not Confirm.ask(f"Delete collection '{target_collection}'? This cannot be undone.", default=False):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+        
+        # Perform deletion
+        try:
+            from chunky.vectorstore.chroma_store import ChromaStore
+            store = ChromaStore(config.chroma)
+            store.connect()
+            
+            if store.collection_exists(target_collection):
+                store.drop_collection(target_collection)
+                console.print(f"[bold green]✓ Collection '{target_collection}' deleted.[/bold green]")
+            else:
+                console.print(f"[yellow]Collection '{target_collection}' does not exist.[/yellow]")
+            
+            store.close()
+        except Exception as e:
+            console.print(f"[red]Failed to delete collection:[/red] {e}")
+            raise SystemExit(1)
+        return
 
     if collection_name is not None:
         # Set collection override and switch to ChromaDB
@@ -694,6 +983,10 @@ def chroma_config() -> None:
 )
 def build(dir_path: str, collection: str | None) -> None:
     """Build a knowledge base from a directory of documents."""
+    # CRITICAL: Import hf_setup first to ensure HF_ENDPOINT is set
+    # before any Hugging Face related imports
+    from chunky.utils import hf_setup
+    
     directory = Path(dir_path).resolve()
     config = load_config()
     
@@ -718,8 +1011,24 @@ def build(dir_path: str, collection: str | None) -> None:
         )
     )
 
+    # ── Download Models (if needed) ───────────────────────────────
+    if not config.test_mode:
+        from chunky.utils.model_downloader import ensure_models_downloaded
+        
+        console.print("[bold]Step 0/N[/bold] Checking models ...")
+        
+        models_ready = ensure_models_downloaded(config)
+        
+        if not models_ready:
+            console.print("\n[bold red]Model download failed![/bold red]")
+            console.print("[yellow]Please check your network connection or model IDs.[/yellow]")
+            raise SystemExit(1)
+        
+        console.print("[bold green]Models ready![/bold green]")
+        console.print()
+
     # ── Connectivity Tests ─────────────────────────────────────────
-    console.print("[bold]Step 0/N[/bold] Testing connectivity ...")
+    console.print("[bold]Step 1/N[/bold] Testing connectivity ...")
     from chunky.utils.connectivity import run_connectivity_tests
 
     results = run_connectivity_tests(config)
@@ -837,6 +1146,17 @@ def build(dir_path: str, collection: str | None) -> None:
     is_flag=True,
     help="Show detailed scores for each result.",
 )
+@click.option(
+    "--rerank", "-r",
+    is_flag=True,
+    help="Use reranker to rerank results.",
+)
+@click.option(
+    "--rerank-top-k",
+    default=20,
+    type=int,
+    help="Number of initial results to rerank (default: 20).",
+)
 def search(
     query: str,
     collection: str | None,
@@ -847,6 +1167,8 @@ def search(
     no_labels: bool,
     no_topics: bool,
     verbose: bool,
+    rerank: bool,
+    rerank_top_k: int,
 ) -> None:
     """Search the knowledge base using hybrid search (vector + BM25).
     
@@ -859,7 +1181,15 @@ def search(
         chunky search "transformer attention" -vw 0.7 -bw 0.3 -f rrf
     """
     config = load_config()
-    collection_name = collection or config.milvus.default_collection
+    
+    # Select default collection based on vector store type
+    if collection is None:
+        if config.vector_store_type == "chroma":
+            collection_name = config.chroma.default_collection
+        else:
+            collection_name = config.milvus.default_collection
+    else:
+        collection_name = collection
 
     # Print header
     print("=" * 50)
@@ -899,14 +1229,47 @@ def search(
         
         print(f"Searching {chunks_count} chunks...")
         
+        # Determine initial top_k for search (need more for reranking)
+        search_top_k = rerank_top_k if rerank else top_k
+        
         results = manager.search(
             query=query,
             collection_name=collection_name,
-            top_k=top_k,
+            top_k=search_top_k,
             vector_weight=vector_weight,
             bm25_weight=bm25_weight,
             fusion_method=fusion_method,
         )
+        
+        # Apply reranker if enabled
+        if rerank and results:
+            if config.reranker.model_name:
+                print(f"Reranking {len(results)} results with {config.reranker.api_type} reranker...")
+                from chunky.reranker import get_reranker
+                
+                try:
+                    reranker = get_reranker(config.reranker)
+                    documents = [r.text for r in results]
+                    reranked = reranker.rerank(query, documents, top_k=top_k)
+                    
+                    # Update results based on reranker output
+                    new_results = []
+                    for i, rr in enumerate(reranked, 1):
+                        orig_result = results[rr.index]
+                        orig_result.rank = i
+                        # Update combined score to reflect reranker score
+                        orig_result.combined_score = rr.score
+                        new_results.append(orig_result)
+                    
+                    results = new_results
+                    print(f"Reranking complete.")
+                except Exception as e:
+                    print(f"Warning: Reranking failed: {e}")
+                    # Fallback to original results, truncate to top_k
+                    results = results[:top_k]
+            else:
+                print("Warning: Reranker enabled but no model configured. Skipping rerank.")
+                results = results[:top_k]
         
         manager.close()
 

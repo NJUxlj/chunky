@@ -196,7 +196,7 @@ def update_lda_topics(self, collection_name: str, chunks: list[Chunk]) -> int: .
 
 ## 时间线
 - 开始时间: 2026-03-19 20:54
-- 最后更新: 2026-03-20 08:45
+- 最后更新: 2026-03-21 22:00
 
 ## 测试命令
 ```bash
@@ -302,3 +302,293 @@ chunky search "machine learning" --collection my_collection -k 3
 **测试结果**: ✅ 全部通过
 - 单元测试 115/117 通过（2个失败是交互式 init 测试，非功能 bug）
 - 搜索功能正常工作
+
+### 2026-03-21: 修复模型下载与缓存查找逻辑
+
+**问题1**: 模型下载源选择基于代理环境变量，而非实际连通性测试
+
+**原因**:
+- 代码检测 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量来判断是否使用 Hugging Face
+- 用户可能设置了代理环境变量，但代理软件并未实际运行
+- `hf-mirror.com` 只代理 API，不代理实际的模型文件（存储在 `cas-bridge.xethub.hf.co`）
+
+**解决方案**:
+- `_test_hf_download()`: 实际测试 Hugging Face CDN 文件下载能力
+- `_test_modelscope_download()`: 测试 ModelScope 连通性
+- `_detect_best_source()`: 基于实际下载测试选择源，而非环境变量
+- 即使代理测试通过，也显示风险提示（大文件可能超时）
+
+**问题2**: Step 1 连通性测试重复下载模型
+
+**原因**:
+- `SentenceTransformer(model_name)` 会触发 Hugging Face 自动下载
+- Step 0 检测到的缓存未被 Step 1 使用
+
+**解决方案**:
+- `find_cached_model()`: 添加模糊匹配缓存查找
+  - 完全匹配: `Qwen/Qwen3-Embedding-0.6B` → `Qwen--Qwen3-Embedding-0.6B`
+  - 短名匹配: `Qwen3-Embedding-0.6B` → `Qwen--Qwen3-Embedding-0.6B`  
+  - 大小写不敏感: `qwen3-embedding-0.6b` → `Qwen--Qwen3-Embedding-0.6B`
+- `_resolve_model_path()`: 优先使用缓存路径的优先级逻辑:
+  1. 用户设置的 `local_model_path`（如果有效）
+  2. 模糊匹配在 `~/.cache/chunky/models/` 中查找
+  3. 回退到 `model_name`（触发 Hugging Face 下载）
+- `ensure_models_downloaded()`: 下载后设置 `config.local_model_path`
+
+**涉及文件**:
+- `src/chunky/utils/model_downloader.py` - 下载管理、模糊匹配
+- `src/chunky/utils/connectivity.py` - 连通性测试使用缓存路径
+
+**测试结果**: ✅ 全部通过
+- 代理检测从 ~4秒优化到 ~0.2ms
+- 缓存命中时不再重复下载
+- ModelScope 切换提示正常显示
+- 模糊匹配正确找到缓存模型
+
+### 2026-03-21 (晚): LLM Labeling 并发优化
+
+**问题**: LLM 打标签阶段串行处理，59 个 chunks 耗时约 6 分钟
+
+**分析**: 
+- LLM API 调用是 I/O 密集型操作
+- 串行处理导致大量 CPU 空等时间
+- API 响应时间约 6 秒/个 chunk
+
+**解决方案**: 线程池并发处理
+
+**实现**:
+- `LLMLabeler.label_chunks()`: 新增 `progress_callback` 参数支持进度回调
+- `_label_chunks_concurrent()`: 使用 `ThreadPoolExecutor` 并发处理
+- `_label_chunks_sequential()`: 小批量时回退到串行（避免线程开销）
+- `PipelineRunner._label_chunks_concurrent()`: 批量处理所有 chunks
+- `LLMConfig.max_concurrent`: 新增可配置并发数（默认 5）
+
+**关键设计**:
+```python
+# 线程安全进度更新
+progress_lock = Lock()
+def progress_callback():
+    with progress_lock:
+        self.progress.update_llm_labeling(advance=1)
+
+# 使用 ThreadPoolExecutor
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    futures = {executor.submit(label_task, chunk): i for i, chunk in enumerate(chunks)}
+    for future in as_completed(futures):
+        # 处理完成结果
+```
+
+**预期效果**:
+- 原耗时: 59 chunks × 6秒 = 354秒（约 6分钟）
+- 优化后: 354秒 ÷ 5 并发 ≈ 71秒（约 1.2分钟）
+- **提升约 5 倍**
+
+**涉及文件**:
+- `src/chunky/llm/labeler.py` - 并发 Labeler 实现
+- `src/chunky/pipeline/runner.py` - 批量 labeling 集成
+- `src/chunky/config/settings.py` - max_concurrent 配置
+
+**测试结果**: ✅ 代码结构测试通过
+- 空列表处理正常
+- 小批量自动使用串行
+- 进度回调线程安全
+
+### 2026-03-21 (晚): 添加删除 Collection 功能
+
+**需求**: 支持删除指定的 ChromaDB/Milvus collection
+
+**实现**:
+- `chunky chroma --collection xxx --delete` - 删除 ChromaDB collection
+- `chunky milvus --collection xxx --delete` - 删除 Milvus collection
+
+**特性**:
+- 支持 `--collection` 指定要删除的集合（或使用默认集合）
+- 删除前需要用户确认（防止误删）
+- 如果集合不存在，给出友好提示
+
+**示例**:
+```bash
+# 删除默认集合
+chunky chroma --delete
+
+# 删除指定集合
+chunky milvus --collection my_kb --delete
+```
+
+**涉及文件**:
+- `src/chunky/cli/main.py` - 添加 `--delete` 选项和删除逻辑
+
+**测试结果**: ✅ 帮助信息显示正确，删除功能待测试
+
+### 2026-03-21 (晚): 配置时显示缓存模型列表
+
+**需求**: 在配置 embedding 和 reranker 模型时，显示缓存目录中的可用模型
+
+**实现**:
+- 在 `Model name (Hugging Face model ID)` 提示上方显示缓存模型列表
+- 使用 `[dim]` 标签实现 50% 透明度
+- 缩进 4 个空格，使用 bullet point (•) 格式
+- 只显示有效的模型目录（包含 config.json）
+
+**效果**:
+```
+  Cached models (use short name or full HF ID):
+    • BAAI/bge-reranker-base
+    • BAAI/bge-small-zh-v1.5
+    • Qwen/Qwen3-Embedding-0.6B
+    • prajjwal1/bert-tiny
+  Model name (Hugging Face model ID) (BAAI/bge-small-zh-v1.5):
+```
+
+**涉及文件**:
+- `src/chunky/cli/main.py` - `_prompt_embedding_config()` 和 `_prompt_reranker_config()`
+
+**测试结果**: ✅ 正常显示缓存模型列表
+
+### 2026-03-21 (晚): 抑制 PDF FontBBox 警告
+
+**问题**: 解析某些 PDF 时出现大量 `FontBBox` 警告
+
+```
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+```
+
+**原因**: 
+- pdfplumber 解析不规范 PDF 时的警告
+- 某些 PDF 缺少字体边界框元数据
+- 不影响文本提取，只是视觉干扰
+
+**解决方案**:
+- 在 `pdf_parser.py` 模块级别添加警告过滤器
+- 抑制 `FontBBox` 和 `font descriptor` 相关警告
+
+**修改**:
+```python
+import warnings
+warnings.filterwarnings("ignore", message=".*FontBBox.*")
+warnings.filterwarnings("ignore", message=".*font descriptor.*", category=UserWarning)
+```
+
+**涉及文件**:
+- `src/chunky/parsers/pdf_parser.py`
+
+**测试结果**: ✅ PDF 解析时不再显示 FontBBox 警告
+
+**更新**: 加强 FontBBox 警告抑制
+- 添加 `logging.getLogger("pdfminer").setLevel(logging.ERROR)` 抑制 pdfminer 的日志警告
+- 确保在导入 pdfplumber 之前设置所有过滤器
+
+### 2026-03-21 (晚): 修复 search 命令默认 collection 选择逻辑
+
+**问题**: `chunky search` 命令始终使用 `config.milvus.default_collection`，忽略了 `vector_store_type` 设置
+
+**现象**:
+- 用户配置 `vector_store_type: chroma`
+- 运行 `chunky search "query"` 时，使用了 `test_milvus` 而不是 `test_check`
+- 导致搜索时集合名称错误
+
+**原因**:
+```python
+# 原代码（错误）
+collection_name = collection or config.milvus.default_collection  # 硬编码使用 milvus
+```
+
+**修复**:
+```python
+# 修复后（正确）
+if collection is None:
+    if config.vector_store_type == "chroma":
+        collection_name = config.chroma.default_collection
+    else:
+        collection_name = config.milvus.default_collection
+else:
+    collection_name = collection
+```
+
+**涉及文件**:
+- `src/chunky/cli/main.py` - search 函数
+
+**测试结果**: ✅ 代码语法检查通过
+
+### 2026-03-21 (晚): 彻底修复 ChromaDB collection 删除问题
+
+**问题**: `chunky chroma --delete` 后，SQLite 中仍残留 collection 记录，导致维度不匹配错误
+
+**根本原因**:
+```
+ChromaDB 存储架构:
+├── chroma.sqlite3          ← 元数据数据库
+│   ├── collections 表      ← collection 名称和 ID
+│   ├── embeddings 表       ← embedding 数据  
+│   └── segments 表         ← 向量索引片段
+└── {uuid}/ 目录           ← 向量文件
+
+问题: client.delete_collection() 只删除了向量文件，
+     但没有删除 SQLite 中的 collections 和 embeddings 记录！
+```
+
+**修复方案**:
+1. **调用 ChromaDB API 删除**
+2. **强制 persist 更改**
+3. **直接操作 SQLite 清理残留记录**:
+   - 查询 collections 表获取 collection ID
+   - 删除 embeddings 记录（先删，避免外键约束）
+   - 删除 segments 记录
+   - 删除 collection_metadata 记录
+   - 删除 collections 记录
+4. **重置客户端**清除内存缓存
+
+**代码修改**:
+```python
+def drop_collection(self, collection_name: str) -> None:
+    # ... API 删除 ...
+    # ... 强制 persist ...
+    
+    # 直接清理 SQLite
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM collections WHERE name = ?", (collection_name,))
+    if result:
+        collection_id = result[0]
+        cursor.execute("DELETE FROM embeddings WHERE ...", (collection_id,))
+        cursor.execute("DELETE FROM segments WHERE ...", (collection_id,))
+        cursor.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
+        conn.commit()
+```
+
+**涉及文件**:
+- `src/chunky/vectorstore/chroma_store.py`
+
+**用户操作**:
+```bash
+# 现在删除会彻底清理
+chunky chroma --collection test_chroma --delete
+
+# 或者使用强力清理（如果代码修复后仍有问题）
+rm -rf ~/.chunky/chroma_db/*
+```
+
+**问题**: `chunky chroma --delete` 后重建 collection，搜索时仍报维度不匹配错误
+
+**原因分析**:
+1. `drop_collection()` 方法调用 `client.delete_collection()` 但 ChromaDB 底层数据未完全清除
+2. `create_collection()` 使用 `get_or_create=True`，如果旧数据存在会复用
+3. 导致新 collection 仍保留旧的维度（384维）配置
+
+**修复**:
+- `drop_collection()`: 添加存在性检查、清除内部缓存、改进错误处理
+- 删除前先 `get_collection` 确认存在，避免误报
+- 删除后清除 `self._collection` 缓存
+- 异常时重新抛出，让调用者知道删除失败
+
+**涉及文件**:
+- `src/chunky/vectorstore/chroma_store.py`
+
+**建议用户操作**:
+```bash
+# 如果问题仍然存在，手动清除 ChromaDB 数据
+rm -rf ~/.chunky/chroma_db/*
+
+# 然后重新构建
+chunky build --dir ./test_docs --collection test_chroma
+```

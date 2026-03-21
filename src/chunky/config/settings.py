@@ -20,6 +20,7 @@ class LLMConfig(BaseModel):
     api_type: str = "openai"  # "openai" or "vllm"
     max_tokens: int = 1024
     temperature: float = 0.3
+    max_concurrent: int = 5  # Max concurrent LLM API calls for labeling
 
 
 class EmbeddingConfig(BaseModel):
@@ -29,11 +30,16 @@ class EmbeddingConfig(BaseModel):
     api_key: str = ""    # Optional API key for embedding service
     device: str = "cpu"
     batch_size: int = 32
+    local_model_path: str = ""  # Local path to model (for local mode)
 
 
 class RerankerConfig(BaseModel):
     model_name: str = ""
+    api_type: str = "local"  # "local", "openai", "vllm"
+    api_base: str = ""  # API base URL for vllm/openai reranker service
+    api_key: str = ""  # API key for authentication
     device: str = "cpu"
+    local_model_path: str = ""  # Local path to model (for local mode)
 
 
 class MilvusConfig(BaseModel):
